@@ -78,15 +78,26 @@
 //! assert_eq!(an_atomic.load(Ordering::SeqCst), /* n_jobs = */ 23);
 //! ```
 
-extern crate num_cpus;
+#![cfg_attr(all(feature = "mesalock_sgx",
+                not(target_env = "sgx")), no_std)]
+#![cfg_attr(all(target_env = "sgx", target_vendor = "mesalock"), feature(rustc_private))]
+
+#[cfg(all(feature = "mesalock_sgx", not(target_env = "sgx")))]
+#[macro_use]
+extern crate sgx_tstd as std;
+
+use std::prelude::v1::*;
+
+//extern crate num_cpus;
+pub const NUM_CPU: usize = 1;
 
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, SgxCondvar as Condvar, SgxMutex as Mutex};
 use std::thread;
 
-trait FnBox {
+pub trait FnBox {
     fn call_box(self: Box<Self>);
 }
 
@@ -96,7 +107,7 @@ impl<F: FnOnce()> FnBox for F {
     }
 }
 
-type Thunk<'a> = Box<FnBox + Send + 'a>;
+type Thunk<'a> = Box<dyn FnBox + Send + 'a>;
 
 struct Sentinel<'a> {
     shared_data: &'a Arc<ThreadPoolSharedData>,
@@ -158,7 +169,7 @@ impl<'a> Drop for Sentinel<'a> {
 pub struct Builder {
     num_threads: Option<usize>,
     thread_name: Option<String>,
-    thread_stack_size: Option<usize>,
+    //thread_stack_size: Option<usize>,
 }
 
 impl Builder {
@@ -175,7 +186,7 @@ impl Builder {
         Builder {
             num_threads: None,
             thread_name: None,
-            thread_stack_size: None,
+            //thread_stack_size: None,
         }
     }
 
@@ -238,32 +249,32 @@ impl Builder {
         self
     }
 
-    /// Set the stack size (in bytes) for each of the threads spawned by the built [`ThreadPool`].
-    /// If not specified, threads spawned by the threadpool will have a stack size [as specified in
-    /// the `std::thread` documentation][thread].
-    ///
-    /// [thread]: https://doc.rust-lang.org/nightly/std/thread/index.html#stack-size
-    /// [`ThreadPool`]: struct.ThreadPool.html
-    ///
-    /// # Examples
-    ///
-    /// Each thread spawned by this pool will have a 4 MB stack:
-    ///
-    /// ```
-    /// let pool = threadpool::Builder::new()
-    ///     .thread_stack_size(4_000_000)
-    ///     .build();
-    ///
-    /// for _ in 0..100 {
-    ///     pool.execute(|| {
-    ///         println!("This thread has a 4 MB stack size!");
-    ///     })
-    /// }
-    /// ```
-    pub fn thread_stack_size(mut self, size: usize) -> Builder {
-        self.thread_stack_size = Some(size);
-        self
-    }
+    ///// Set the stack size (in bytes) for each of the threads spawned by the built [`ThreadPool`].
+    ///// If not specified, threads spawned by the threadpool will have a stack size [as specified in
+    ///// the `std::thread` documentation][thread].
+    /////
+    ///// [thread]: https://doc.rust-lang.org/nightly/std/thread/index.html#stack-size
+    ///// [`ThreadPool`]: struct.ThreadPool.html
+    /////
+    ///// # Examples
+    /////
+    ///// Each thread spawned by this pool will have a 4 MB stack:
+    /////
+    ///// ```
+    ///// let pool = threadpool::Builder::new()
+    /////     .thread_stack_size(4_000_000)
+    /////     .build();
+    /////
+    ///// for _ in 0..100 {
+    /////     pool.execute(|| {
+    /////         println!("This thread has a 4 MB stack size!");
+    /////     })
+    ///// }
+    ///// ```
+    //pub fn thread_stack_size(mut self, size: usize) -> Builder {
+    //    self.thread_stack_size = Some(size);
+    //    self
+    //}
 
     /// Finalize the [`Builder`] and build the [`ThreadPool`].
     ///
@@ -281,7 +292,7 @@ impl Builder {
     pub fn build(self) -> ThreadPool {
         let (tx, rx) = channel::<Thunk<'static>>();
 
-        let num_threads = self.num_threads.unwrap_or_else(num_cpus::get);
+        let num_threads = self.num_threads.unwrap_or_else(|| NUM_CPU);
 
         let shared_data = Arc::new(ThreadPoolSharedData {
             name: self.thread_name,
@@ -293,7 +304,7 @@ impl Builder {
             active_count: AtomicUsize::new(0),
             max_thread_count: AtomicUsize::new(num_threads),
             panic_count: AtomicUsize::new(0),
-            stack_size: self.thread_stack_size,
+            //stack_size: self.thread_stack_size,
         });
 
         // Threadpool threads
@@ -308,17 +319,17 @@ impl Builder {
     }
 }
 
-struct ThreadPoolSharedData {
-    name: Option<String>,
-    job_receiver: Mutex<Receiver<Thunk<'static>>>,
-    empty_trigger: Mutex<()>,
-    empty_condvar: Condvar,
-    join_generation: AtomicUsize,
-    queued_count: AtomicUsize,
-    active_count: AtomicUsize,
-    max_thread_count: AtomicUsize,
-    panic_count: AtomicUsize,
-    stack_size: Option<usize>,
+pub struct ThreadPoolSharedData {
+    pub name: Option<String>,
+    pub job_receiver: Mutex<Receiver<Thunk<'static>>>,
+    pub empty_trigger: Mutex<()>,
+    pub empty_condvar: Condvar,
+    pub join_generation: AtomicUsize,
+    pub queued_count: AtomicUsize,
+    pub active_count: AtomicUsize,
+    pub max_thread_count: AtomicUsize,
+    pub panic_count: AtomicUsize,
+    //stack_size: Option<usize>,
 }
 
 impl ThreadPoolSharedData {
@@ -686,7 +697,7 @@ impl Clone for ThreadPool {
 /// this will create one thread per hyperthread.
 impl Default for ThreadPool {
     fn default() -> Self {
-        ThreadPool::new(num_cpus::get())
+        ThreadPool::new(NUM_CPU)
     }
 }
 
@@ -732,9 +743,12 @@ fn spawn_in_pool(shared_data: Arc<ThreadPoolSharedData>) {
     if let Some(ref name) = shared_data.name {
         builder = builder.name(name.clone());
     }
-    if let Some(ref stack_size) = shared_data.stack_size {
-        builder = builder.stack_size(stack_size.to_owned());
-    }
+    // Yu Ding:
+    // Specifying stack size for SGX thread is meaningless
+    // Commented out
+    //if let Some(ref stack_size) = shared_data.stack_size {
+    //    builder = builder.stack_size(stack_size.to_owned());
+    //}
     builder
         .spawn(move || {
             // Will spawn a new thread on panic unless it is cancelled.
